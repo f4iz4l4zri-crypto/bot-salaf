@@ -1,0 +1,18 @@
+{
+  "name": "ws-grup-salaf",
+  "version": "1.0.0",
+  "description": "Bot WhatsApp Rujukan Agama & Dalil Salaf",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.24",
+    "long": "^5.2.3",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "pino": "^9.6.0",
+    "node-cron": "^3.0.3"
+  }
+}
