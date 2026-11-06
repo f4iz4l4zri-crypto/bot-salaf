@@ -23,9 +23,14 @@ PANDUAN SUSUNAN JAWAPAN (Sesuai untuk WhatsApp):
 `;
 
 /**
- * Panggil Google Gemini REST API secara terus menggunakan fetch bawaan Node.js
+ * Fungsi pembantu menunggu (sleep)
  */
-async function callGeminiApi(prompt, systemPrompt = SYSTEM_INSTRUCTION, useGoogleSearch = true, temperature = 0.3) {
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Panggil Google Gemini REST API dengan sokongan Auto-Retry & Timeout
+ */
+async function callGeminiApi(prompt, systemPrompt = SYSTEM_INSTRUCTION, useGoogleSearch = true, temperature = 0.3, maxRetries = 2) {
   if (!config.geminiApiKey || config.geminiApiKey.includes('masukkan_api_key')) {
     throw new Error('GEMINI_API_KEY belum dikonfigurasi dalam fail .env');
   }
@@ -51,26 +56,48 @@ async function callGeminiApi(prompt, systemPrompt = SYSTEM_INSTRUCTION, useGoogl
     payload.tools = [{ googleSearch: {} }];
   }
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
-  });
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 25000); // 25 saat timeout
 
-  const data = await response.json();
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
 
-  if (!response.ok) {
-    const errorMsg = data.error?.message || response.statusText;
-    throw new Error(`Ralat Gemini API (${response.status}): ${errorMsg}`);
+      clearTimeout(timeoutId);
+      const data = await response.json();
+
+      if (!response.ok) {
+        const errorMsg = data.error?.message || response.statusText;
+        // Jika kena Rate Limit 429, tunggu 3 saat dan cuba lagi
+        if (response.status === 429 && attempt <= maxRetries) {
+          console.warn(`[Gemini] Kena had limit sementara (429). Menunggu 3 saat sebelum percubaan ke-${attempt + 1}...`);
+          await sleep(3000);
+          continue;
+        }
+        throw new Error(`Ralat Gemini API (${response.status}): ${errorMsg}`);
+      }
+
+      if (data.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
+        return data.candidates[0].content.parts[0].text;
+      }
+
+      throw new Error('Tiada jawapan dijana daripada model Gemini.');
+    } catch (err) {
+      if (attempt <= maxRetries && (err.name === 'AbortError' || err.message.includes('fetch failed'))) {
+        console.warn(`[Gemini] Masalah rangkaian (${err.message}). Mencuba semula percubaan ke-${attempt + 1}...`);
+        await sleep(2000);
+        continue;
+      }
+      throw err;
+    }
   }
-
-  if (data.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
-    return data.candidates[0].content.parts[0].text;
-  }
-
-  throw new Error('Tiada jawapan dijana daripada model Gemini.');
 }
 
 /**
@@ -82,8 +109,7 @@ async function answerQuestionWithDalil(question) {
   try {
     return await callGeminiApi(prompt, SYSTEM_INSTRUCTION, true, 0.3);
   } catch (err) {
-    // Jika ralat melibatkan tool googleSearch pada model tertentu, cuba tanpa tools
-    console.warn('[Gemini] Cuba semula tanpa Google Search grounding...', err.message);
+    console.warn('[Gemini] Percubaan dengan Google Search gagal, cuba tanpa tools...', err.message);
     return await callGeminiApi(prompt, SYSTEM_INSTRUCTION, false, 0.3);
   }
 }
