@@ -2,55 +2,38 @@ const cron = require('node-cron');
 const config = require('../config');
 const { generateDailyFaedah } = require('../gemini');
 
+// Senarai EKSKLUSIF 3 Grup Sasaran Sahaja untuk Faedah Harian:
+// 1. "salaf"
+// 2. "keluarga ummi habibi"
+// 3. "papa❤mama = 👪"
+const STRICT_TARGET_GROUPS = [
+  '60197602500-1379154224@g.us',
+  '60132068983-1425281869@g.us',
+  '60129352664-1404370463@g.us'
+];
+
 /**
- * Menghantar Faedah Ilmiah ke semua grup sasaran:
- * - Grup yang ditetapkan dalam TARGET_GROUP_JID
- * - Grup yang dikesan secara automatik mengikut nama (contoh: "salaf", "ummi", "mama", "family")
+ * Menghantar Faedah Ilmiah KHAS untuk 3 grup terpilih sahaja (bukan semua grup)
  */
 async function sendDailyFaedahToAllGroups(sock) {
   try {
     console.log('[Scheduler] Menjana faedah ilmiah harian pagi...');
     const faedah = await generateDailyFaedah();
 
-    // 1. Kumpulkan JID dari .env (jika ada)
-    const targetSet = new Set(config.targetGroupJids || []);
+    // Gunakan senarai dari .env jika ada, atau fallback kepada 3 grup rasmi di atas
+    const targetJids = config.targetGroupJids && config.targetGroupJids.length > 0
+      ? config.targetGroupJids
+      : STRICT_TARGET_GROUPS;
 
-    // 2. Automatik cari SEMUA grup yang disertai oleh bot yang mempunyai nama sasaran
-    try {
-      const allGroups = await sock.groupFetchAllParticipating();
-      for (const [jid, groupData] of Object.entries(allGroups)) {
-        const subject = (groupData.subject || '').toLowerCase();
+    console.log(`[Scheduler] Menghantar faedah harian ke ${targetJids.length} grup terpilih sahaja:`);
 
-        // Senarai kata kunci nama grup yang ingin dihantar faedah harian
-        const matchesTarget =
-          subject.includes('salaf') ||
-          subject.includes('ummi') ||
-          subject.includes('mama') ||
-          subject.includes('family') ||
-          subject.includes('keluarga');
-
-        if (matchesTarget) {
-          targetSet.add(jid);
-          console.log(`[Scheduler] Grup padanan dikesan: "${groupData.subject}" (${jid})`);
-        }
-      }
-    } catch (e) {
-      console.warn('[Scheduler] Amaran carian grup automatik:', e.message);
-    }
-
-    if (targetSet.size === 0) {
-      console.log('[Scheduler] Tiada grup sasaran ditemui untuk penghantaran faedah harian.');
-      return 0;
-    }
-
-    console.log(`[Scheduler] Menghantar faedah harian ke ${targetSet.size} grup...`);
     let count = 0;
-    for (const jid of targetSet) {
+    for (const jid of targetJids) {
       try {
         await sock.sendMessage(jid, { text: faedah });
         count++;
-        console.log(`[Scheduler] Berjaya hantar ke grup: ${jid}`);
-        // Tunggu 1.5 saat antara mesej untuk kestabilan
+        console.log(`[Scheduler] Berjaya hantar ke grup terpilih: ${jid}`);
+        // Tunggu 1.5 saat antara mesej
         await new Promise(r => setTimeout(r, 1500));
       } catch (err) {
         console.error(`[Scheduler] Gagal hantar ke ${jid}:`, err.message);
@@ -69,16 +52,17 @@ async function sendDailyFaedahToAllGroups(sock) {
 function initScheduler(sock) {
   // Jam 07:30 pagi waktu Malaysia (Asia/Kuala_Lumpur)
   cron.schedule('30 7 * * *', async () => {
-    console.log('[Scheduler] Waktu faedah pagi tiba (7:30 AM). Memulakan siaran...');
+    console.log('[Scheduler] Waktu faedah pagi tiba (7:30 AM). Menghantar ke 3 grup terpilih...');
     await sendDailyFaedahToAllGroups(sock);
   }, {
     timezone: 'Asia/Kuala_Lumpur'
   });
 
-  console.log('[Scheduler] Penjadualan faedah harian aktif (Setiap hari jam 7:30 pagi untuk semua grup terpilih).');
+  console.log('[Scheduler] Penjadualan faedah harian aktif (Setiap hari jam 7:30 pagi untuk 3 grup terpilih sahaja).');
 }
 
 module.exports = {
   initScheduler,
-  sendDailyFaedahToAllGroups
+  sendDailyFaedahToAllGroups,
+  STRICT_TARGET_GROUPS
 };
