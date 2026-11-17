@@ -31,6 +31,7 @@ module.exports = {
   botPrefix: process.env.BOT_PREFIX || '!',
   botMode: process.env.BOT_MODE || 'mention_or_prefix',
   targetGroupJid: process.env.TARGET_GROUP_JID || '',
+  targetGroupJids: (process.env.TARGET_GROUP_JID || '').split(',').map(s => s.trim()).filter(Boolean),
   usePairingCode: process.env.USE_PAIRING_CODE === 'true',
   botPhoneNumber: (process.env.BOT_PHONE_NUMBER || '').replace(/[^0-9]/g, ''),
   respondInPrivate: process.env.RESPOND_IN_PRIVATE === 'true', // Default false: abaikan semua chat peribadi (PM/DM)

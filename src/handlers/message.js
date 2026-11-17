@@ -1,5 +1,10 @@
+const { decryptPollVote, sha256 } = require('@whiskeysockets/baileys');
 const config = require('../config');
 const { answerQuestionWithDalil, generateDailyFaedah, generateQuiz } = require('../gemini');
+const { sendDailyFaedahToAllGroups } = require('./scheduler');
+
+// Cache untuk menyimpan maklumat mesej poll bagi mendekripsi undian (vote)
+const pollCache = new Map();
 
 /**
  * Mendapatkan teks daripada objek mesej Baileys
@@ -39,25 +44,118 @@ function isReplyingToBot(message, botJid) {
  */
 const FOOTER_SHORTCUTS = `\n\n───────────────────────────\n💡 *Pintasan Pantas (Sentuh untuk salin):*\n• \`!faedah\` (Mutiara Kata Salaf)\n• \`!kuiz\` (Kuiz Agama Santai)\n• \`!menu\` (Buka Butang Pilihan)`;
 
+const POLL_OPTIONS = [
+  '🌿 Mutiara Faedah Salaf',
+  '🎯 Kuiz Agama Interaktif',
+  '❓ Cara Bertanya Dalil'
+];
+
 /**
  * Menghantar mesej undian (Poll) sebagai butang interaktif di WhatsApp
  */
 async function sendPollMenu(sock, from, quotedMsg) {
   try {
-    await sock.sendMessage(from, {
+    const pollCreation = await sock.sendMessage(from, {
       poll: {
-        name: '📖 PILIHAN PANTAS BOT SALAF\n(Sila sentuh / undi salah satu pilihan di bawah):',
-        values: [
-          '🌿 Mutiara Faedah Salaf',
-          '🎯 Kuiz Agama Interaktif',
-          '❓ Cara Bertanya Dalil'
-        ],
+        name: '📖 PILIHAN PANTAS BOT SALAF\n(Sentuh pilihan undian atau reply nombor 1, 2, 3):',
+        values: POLL_OPTIONS,
         selectableCount: 1
       }
     }, { quoted: quotedMsg });
+
+    // Simpan kunci rahsia poll ke dalam cache untuk membolehkan dekripsi undian apabila ahli klik
+    if (pollCreation?.key?.id) {
+      const pollEncKey =
+        pollCreation.message?.messageContextInfo?.messageSecret ||
+        pollCreation.message?.pollCreationMessageV3?.messageSecret ||
+        pollCreation.message?.pollCreationMessage?.messageSecret;
+
+      const pollCreatorJid = sock.user?.id
+        ? sock.user.id.split(':')[0] + '@s.whatsapp.net'
+        : pollCreation.key.participant || from;
+
+      pollCache.set(pollCreation.key.id, {
+        from,
+        pollCreatorJid,
+        pollEncKey,
+        pollValues: POLL_OPTIONS
+      });
+
+      console.log(`[Poll] Menu undian dihantar & didaftarkan ke cache (ID: ${pollCreation.key.id})`);
+    }
   } catch (err) {
     console.error('Ralat menghantar Poll:', err.message);
   }
+}
+
+/**
+ * Memproses tindakan apabila undian (vote) diklik oleh ahli grup
+ */
+async function handlePollVote(sock, msg) {
+  const pollUpdate = msg.message?.pollUpdateMessage;
+  if (!pollUpdate) return false;
+
+  const pollKey = pollUpdate.pollCreationMessageKey;
+  if (!pollKey || !pollKey.id) return false;
+
+  const cached = pollCache.get(pollKey.id);
+  if (!cached || !cached.pollEncKey) {
+    // Jika tiada dalam cache (contoh: bot baru restart), abaikan dengan selamat
+    return false;
+  }
+
+  const from = msg.key.remoteJid;
+  const voterJid = msg.key.participant || from;
+
+  try {
+    const decryptedVote = decryptPollVote(pollUpdate.vote, {
+      pollCreatorJid: cached.pollCreatorJid,
+      pollMsgId: pollKey.id,
+      pollEncKey: cached.pollEncKey,
+      voterJid
+    });
+
+    if (decryptedVote?.selectedOptions?.length > 0) {
+      console.log(`[Poll Vote] Pilihan undian dikesan dari: ${voterJid}`);
+
+      for (const optHash of decryptedVote.selectedOptions) {
+        const hashHex = Buffer.from(optHash).toString('hex');
+
+        const opt1Hash = sha256(Buffer.from(cached.pollValues[0])).toString('hex');
+        const opt2Hash = sha256(Buffer.from(cached.pollValues[1])).toString('hex');
+        const opt3Hash = sha256(Buffer.from(cached.pollValues[2])).toString('hex');
+
+        if (hashHex === opt1Hash) {
+          console.log('[Poll Vote] Tindakan: Menjana Faedah Salaf');
+          await sock.sendMessage(from, { react: { text: '🌿', key: msg.key } });
+          const faedah = await generateDailyFaedah();
+          await sock.sendMessage(from, { text: faedah + FOOTER_SHORTCUTS });
+          return true;
+        } else if (hashHex === opt2Hash) {
+          console.log('[Poll Vote] Tindakan: Menjana Kuiz Agama');
+          await sock.sendMessage(from, { react: { text: '🎯', key: msg.key } });
+          const quiz = await generateQuiz();
+          await sock.sendMessage(from, { text: quiz + FOOTER_SHORTCUTS });
+          return true;
+        } else if (hashHex === opt3Hash) {
+          console.log('[Poll Vote] Tindakan: Memaparkan Panduan Dalil');
+          const helpMsg = `📖 *PANDUAN BERTANYA DALIL:*\n\n` +
+            `Cukup mudah! Anda boleh bertanya apa-apa soalan agama dengan format:\n` +
+            `👉 \`!tanya <soalan anda>\`\n` +
+            `👉 \`!dalil <topik>\`\n\n` +
+            `Contoh:\n` +
+            `• \`!tanya apakah dalil keutamaan sedekah?\`\n` +
+            `• \`!dalil adab menuntut ilmu\``;
+          await sock.sendMessage(from, { text: helpMsg + FOOTER_SHORTCUTS });
+          return true;
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Poll Vote] Ralat mendekripsi undian poll:', err.message);
+  }
+
+  return false;
 }
 
 /**
@@ -67,6 +165,12 @@ async function handleIncomingMessage(sock, msg) {
   try {
     if (!msg.message || msg.key.fromMe) return;
 
+    // 1. Periksa sama ada ini adalah tindakan KLIK UNDIAN (Poll Vote Click)
+    if (msg.message?.pollUpdateMessage) {
+      const handled = await handlePollVote(sock, msg);
+      if (handled) return;
+    }
+
     const from = msg.key.remoteJid;
     const isGroup = from.endsWith('@g.us');
     const sender = msg.key.participant || from;
@@ -75,7 +179,7 @@ async function handleIncomingMessage(sock, msg) {
 
     // KAWALAN CHAT PERIBADI (PM/DM):
     // Jika mesej daripada chat peribadi (bukan grup) dan respondInPrivate=false,
-    // ABAIKAN SEPENUHNYA supaya tidak mengganggu urusan peribadi pemilik nombor.
+    // ABAIKAN SEPENUHNYA supaya tidak mengganggu perbualan peribadi pemilik nombor.
     if (!isGroup && !config.respondInPrivate) {
       return;
     }
@@ -93,15 +197,12 @@ async function handleIncomingMessage(sock, msg) {
     let query = '';
 
     if (isCommand) {
-      // Arahan bermula dengan prefix '!' (cth: !tanya, !dalil, !faedah)
       shouldReply = true;
       query = text.slice(prefix.length).trim();
     } else if (mentioned) {
-      // Tag @Bot dalam grup
       shouldReply = true;
       query = text.replace(new RegExp(`@${botNumber}`, 'g'), '').trim();
     } else if (replied) {
-      // Reply kepada mesej bot
       shouldReply = true;
       query = text;
     }
@@ -124,6 +225,14 @@ async function handleIncomingMessage(sock, msg) {
     // Periksa arahan !menu
     if (lowerText === '!menu' || (lowerText === 'menu' && (mentioned || replied))) {
       await sendPollMenu(sock, from, msg);
+      return;
+    }
+
+    // Arahan siaran segera ke semua grup sasaran (!siarfaedah)
+    if (lowerText === 'siarfaedah' || lowerText === '!siarfaedah') {
+      await sock.sendMessage(from, { text: '⏳ Sedang menghantar faedah ilmiah ke semua grup sasaran (Grup Salaf, Ummi Family, Mama Family)...' }, { quoted: msg });
+      const sentCount = await sendDailyFaedahToAllGroups(sock);
+      await sock.sendMessage(from, { text: `✅ Selesai! Faedah harian telah berjaya dihantar ke ${sentCount} grup.` }, { quoted: msg });
       return;
     }
 

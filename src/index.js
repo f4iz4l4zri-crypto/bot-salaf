@@ -62,7 +62,6 @@ async function startBot() {
       if (!config.usePairingCode || !config.botPhoneNumber) {
         console.log('\n📱 [QR CODE LOG MASUK DI TERMINAL]');
         qrcode.generate(qr, { small: true });
-        // Buka gambar QR secara automatik di Windows untuk memudahkan imbasan kamera
         exec(`start "" "${qrImagePath}"`);
       }
     }
@@ -110,14 +109,25 @@ async function startBot() {
       console.log(`Prefix Arahan: ${config.botPrefix}`);
       console.log('===============================================================\n');
 
+      // Paparkan senarai grup yang disertai bot
+      try {
+        const groups = await sock.groupFetchAllParticipating();
+        console.log(`📋 Senarai Grup Disertai (${Object.keys(groups).length} grup):`);
+        for (const [id, g] of Object.entries(groups)) {
+          console.log(`   • "${g.subject}" (ID: ${id})`);
+        }
+        console.log('---------------------------------------------------------------\n');
+      } catch (err) {
+        // abaikan
+      }
+
       // Aktifkan penjadual faedah harian
       initScheduler(sock);
     }
   });
 
-  // Kendalikan mesej masuk
+  // Kendalikan mesej masuk (termasuk mesej biasa dan undian pollUpdateMessage)
   sock.ev.on('messages.upsert', async (m) => {
-    if (m.type !== 'notify') return;
     for (const msg of m.messages) {
       await handleIncomingMessage(sock, msg);
     }
