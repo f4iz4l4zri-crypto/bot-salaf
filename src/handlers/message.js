@@ -1,6 +1,6 @@
 const { decryptPollVote, sha256 } = require('@whiskeysockets/baileys');
 const config = require('../config');
-const { answerQuestionWithDalil, generateDailyFaedah, generateQuiz } = require('../gemini');
+const { answerQuestionWithDalil, generateDailyFaedah, generateQuiz, clearChatMemory } = require('../gemini');
 const { sendDailyFaedahToAllGroups } = require('./scheduler');
 
 // Cache untuk menyimpan maklumat mesej poll bagi mendekripsi undian (vote)
@@ -249,6 +249,15 @@ async function handleIncomingMessage(sock, msg) {
       return;
     }
 
+    // 1b. Arahan Reset Memori Perbualan (!reset / !baru)
+    if (lowerQuery === 'reset' || lowerQuery === 'baru') {
+      clearChatMemory(from);
+      await sock.sendMessage(from, {
+        text: `🔄 *Sesi Perbualan Baharu Dimulakan*\nMemori soalan-soalan terdahulu dalam grup ini telah dikosongkan. Sila ajukan topik atau soalan baharu.`
+      }, { quoted: msg });
+      return;
+    }
+
     // 2. Arahan Bantuan (!help / !bantuan)
     if (lowerQuery === 'help' || lowerQuery === 'bantuan') {
       const helpMessage = `📖 *${config.botName}* 📖\n` +
@@ -257,7 +266,8 @@ async function handleIncomingMessage(sock, msg) {
         `• \`${prefix}tanya <soalan anda>\`\n` +
         `• \`${prefix}dalil <topik>\`\n` +
         `• Tag saya: @${botNumber} <soalan>\n` +
-        `• Balas (reply) mana-mana mesej saya.\n\n` +
+        `• Balas (reply) mana-mana mesej saya untuk soalan susulan (memori perbualan bersambung sehingga 10 soalan).\n` +
+        `• \`${prefix}reset\` : Mulakan topik/sesi sembang baharu.\n\n` +
         `*Pilihan Nombor Pantas (Reply mesej bot sahaja):*\n` +
         `1️⃣ : Dapatkan Mutiara Faedah Salaf\n` +
         `2️⃣ : Jana Kuiz Agama Interaktif\n` +
@@ -307,8 +317,8 @@ async function handleIncomingMessage(sock, msg) {
     await sock.sendMessage(from, { react: { text: '📖', key: msg.key } });
     await sock.sendPresenceUpdate('composing', from);
 
-    // Dapatkan jawapan dari Gemini
-    const answer = await answerQuestionWithDalil(cleanQuestion);
+    // Dapatkan jawapan dari Gemini (dengan pautan memori perbualan mengikut grup 'from')
+    const answer = await answerQuestionWithDalil(cleanQuestion, from);
 
     // Hantar jawapan dengan footer pintasan kemas
     await sock.sendMessage(from, { text: answer + FOOTER_SHORTCUTS }, { quoted: msg });

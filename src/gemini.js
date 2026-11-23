@@ -1,5 +1,83 @@
 const config = require('./config');
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 🧠 PENGURUS MEMORI PERBUALAN (CONVERSATION MEMORY MANAGER)
+// Menyimpan sejarah soalan & jawapan mengikut grup supaya soalan susulan
+// saling berkait (linked), dan hanya bertukar ke sesi baharu apabila memori penuh.
+// ─────────────────────────────────────────────────────────────────────────────
+const chatMemoryStore = new Map();
+const MAX_MEMORY_TURNS = 10;          // Maksimum 10 pusingan Soal-Jawab (20 mesej) sebelum tukar sesi baharu
+const MAX_MEMORY_CHARS = 30000;       // Had maksimum aksara (~7,500 token) sebelum memori dianggap penuh
+const MEMORY_TTL_MS = 3 * 60 * 60 * 1000; // Tamat tempoh selepas 3 jam tiada soalan
+
+/**
+ * Dapatkan sesi memori semasa bagi grup/chat.
+ * Jika memori telah penuh atau tamat tempoh, tukar ke sesi sembang baharu.
+ */
+function getOrRotateChatSession(chatId) {
+  if (!chatId) return { history: [], rotated: false };
+
+  const now = Date.now();
+  const session = chatMemoryStore.get(chatId);
+
+  if (!session) {
+    const newSession = { history: [], turnCount: 0, totalChars: 0, lastUpdated: now };
+    chatMemoryStore.set(chatId, newSession);
+    return { session: newSession, rotated: false, reason: null };
+  }
+
+  // Semak jika memori sudah tamat tempoh (3 jam tidak aktif)
+  if (now - session.lastUpdated > MEMORY_TTL_MS && session.turnCount > 0) {
+    console.log(`[Memori] Sesi ${chatId} tamat tempoh tidak aktif. Membuka sesi perbualan baharu.`);
+    const newSession = { history: [], turnCount: 0, totalChars: 0, lastUpdated: now };
+    chatMemoryStore.set(chatId, newSession);
+    return { session: newSession, rotated: true, reason: 'expired' };
+  }
+
+  // Semak jika memori telah PENUH (melebihi had pusingan atau had aksara)
+  if (session.turnCount >= MAX_MEMORY_TURNS || session.totalChars >= MAX_MEMORY_CHARS) {
+    console.log(`[Memori] Memori ${chatId} telah PENUH (${session.turnCount} soalan, ${session.totalChars} aksara). Menukar ke sesi sembang baharu.`);
+    const newSession = { history: [], turnCount: 0, totalChars: 0, lastUpdated: now };
+    chatMemoryStore.set(chatId, newSession);
+    return { session: newSession, rotated: true, reason: 'full' };
+  }
+
+  return { session, rotated: false, reason: null };
+}
+
+/**
+ * Simpan pasangan soalan & jawapan ke dalam memori grup
+ */
+function saveTurnToMemory(chatId, userQuestion, modelAnswer) {
+  if (!chatId) return;
+  let session = chatMemoryStore.get(chatId);
+  if (!session) {
+    session = { history: [], turnCount: 0, totalChars: 0, lastUpdated: Date.now() };
+    chatMemoryStore.set(chatId, session);
+  }
+
+  session.history.push(
+    { role: 'user', parts: [{ text: userQuestion }] },
+    { role: 'model', parts: [{ text: modelAnswer }] }
+  );
+  session.turnCount += 1;
+  session.totalChars += (userQuestion.length + modelAnswer.length);
+  session.lastUpdated = Date.now();
+
+  console.log(`[Memori] Disimpan untuk ${chatId} | Sesi: ${session.turnCount}/${MAX_MEMORY_TURNS} soalan (${session.totalChars}/${MAX_MEMORY_CHARS} aksara)`);
+}
+
+/**
+ * Kosongkan memori grup secara manual (!reset / !baru)
+ */
+function clearChatMemory(chatId) {
+  if (chatId && chatMemoryStore.has(chatId)) {
+    chatMemoryStore.delete(chatId);
+    return true;
+  }
+  return false;
+}
+
 const SYSTEM_INSTRUCTION = `
 Anda adalah "Bot Rujukan Ilmiah Salaf" untuk sebuah grup WhatsApp perkongsian ilmu agama Islam.
 Tugas utama anda adalah menjawab soalan agama dan membawakan dalil yang sahih berpandukan Al-Quran dan As-Sunnah mengikut manhaj Salafus Soleh demi mencari keredhaan Allah Subhanahu wa Ta'ala.
@@ -14,7 +92,7 @@ Sebelum menyusun jawapan, anda WAJIB melakukan carian pengesahan (melalui Google
    - Untuk menyemak syarah hadis, athar para Sahabat, dan nukilan ulama Salaf daripada kitab-kitab induk (seperti Tafsir Ibn Kathir, Tafsir As-Sa'di, Fathul Bari, Syarah Sahih Muslim, Majmu' Fatawa, Zadul Ma'ad, Al-Majmu', Al-Mughni).
 
 ──────────────────────────────────────────────
-🛡️ 6 DISIPLIN KESELAMATAN ILMU (AT-TATHABBUT):
+🛡️ 7 DISIPLIN KESELAMATAN ILMU (AT-TATHABBUT):
 ──────────────────────────────────────────────
 1. *LARANGAN KERAS MENEKA NOMBOR HADIS / HALAMAN KITAB*:
    - Jika nombor hadis atau jilid/halaman kitab disahkan dengan yakin melalui carian, tuliskan (contoh: HR. Al-Bukhari no. 644).
@@ -30,6 +108,10 @@ Sebelum menyusun jawapan, anda WAJIB melakukan carian pengesahan (melalui Google
    - Jika soalan melibatkan pengesahan jatuh talak/cerai secara spesifik, kiraan faraid yang rumit, atau kes mahkamah, berikan kaedah asas dalil sahaja dan nasihatkan penanya merujuk terus kepada Jabatan Mufti atau Mahkamah Syariah kerana kes sebegini memerlukan siasatan situasi sebenar (tahqiq al-manath).
 6. *ROH DAKWAH, ADAB & HIKMAH*:
    - Gunakan bahasa yang tenang, beradab, mendamaikan hati, jauh daripada sindiran atau perdebatan sia-sia, dan mendorong ahli grup beramal ikhlas kerana Allah SWT (Surah An-Nahl: 125).
+7. *KESINAMBUNGAN PERBUALAN (LINK ANTARA SOALAN SEBELUMNYA)*:
+   - Anda mempunyai memori sejarah soalan dan jawapan terdahulu dalam perbualan ini.
+   - Jika soalan baharu merupakan soalan susulan atau berkait dengan topik/soalan sebelumnya (contoh: menggunakan kata ganti nama seperti "solat itu", "hadis tadi", "bagaimana pula jika...", "kalau perempuan pula?"), hubungkaitkan dengan konteks soalan sebelumnya secara tepat dan harmoni.
+   - Jika soalan baharu membincangkan topik yang berlainan, jawab topik baharu tersebut dengan lengkap mengikut disiplin dalil seperti biasa.
 
 ──────────────────────────────────────────────
 📋 PANDUAN SUSUNAN JAWAPAN (SESUAI UNTUK WHATSAPP):
@@ -56,9 +138,9 @@ Sebelum menyusun jawapan, anda WAJIB melakukan carian pengesahan (melalui Google
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
- * Panggil Google Gemini REST API dengan sokongan Auto-Retry & Timeout
+ * Panggil Google Gemini REST API dengan sokongan Multi-Turn History, Auto-Retry & Timeout
  */
-async function callGeminiApi(prompt, systemPrompt = SYSTEM_INSTRUCTION, useGoogleSearch = true, temperature = 0.15, maxRetries = 2) {
+async function callGeminiApi(promptOrContents, systemPrompt = SYSTEM_INSTRUCTION, useGoogleSearch = true, temperature = 0.15, maxRetries = 2) {
   if (!config.geminiApiKey || config.geminiApiKey.includes('masukkan_api_key')) {
     throw new Error('GEMINI_API_KEY belum dikonfigurasi dalam fail .env');
   }
@@ -66,12 +148,13 @@ async function callGeminiApi(prompt, systemPrompt = SYSTEM_INSTRUCTION, useGoogl
   const model = config.geminiModel || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.geminiApiKey}`;
 
+  // Sokong sama ada string tunggal atau array multi-turn contents
+  const contents = Array.isArray(promptOrContents)
+    ? promptOrContents
+    : [{ role: 'user', parts: [{ text: promptOrContents }] }];
+
   const payload = {
-    contents: [
-      {
-        parts: [{ text: prompt }]
-      }
-    ],
+    contents,
     systemInstruction: {
       parts: [{ text: systemPrompt }]
     },
@@ -129,26 +212,48 @@ async function callGeminiApi(prompt, systemPrompt = SYSTEM_INSTRUCTION, useGoogl
 }
 
 /**
- * Menjawab soalan ahli grup berserta dalil dan semakan silang Dorar.net & Maktabah Shamela
+ * Menjawab soalan ahli grup berserta dalil, semakan silang Dorar.net & Maktabah Shamela,
+ * dan pautan memori perbualan sebelumnya (sehingga memori penuh).
  */
-async function answerQuestionWithDalil(question) {
-  const prompt = `Soalan daripada ahli grup: "${question}"
+async function answerQuestionWithDalil(question, chatId = 'default') {
+  const { session, rotated, reason } = getOrRotateChatSession(chatId);
+
+  const currentPrompt = `Soalan daripada ahli grup: "${question}"
 
 Arahan Semakan & Jawapan:
-1. Lakukan semakan silang (dalam Bahasa Arab & Melayu) merujuk kepada pangkalan data hadis *Dorar.net (الدرر السنية)* dan kitab *Maktabah Shamela (المكتبة الشاملة)*.
-2. Berikan jawapan berdalil yang padat, berhikmah, dan sahih mengikut susunan:
+1. Jika soalan ini bersambung atau merujuk kepada soalan/jawapan terdahulu dalam sejarah perbualan, hubungkaitkan konteksnya dengan tepat.
+2. Lakukan semakan silang (dalam Bahasa Arab & Melayu) merujuk kepada pangkalan data hadis *Dorar.net (الدرر السنية)* dan kitab *Maktabah Shamela (المكتبة الشاملة)*.
+3. Berikan jawapan berdalil yang padat, berhikmah, dan sahih mengikut susunan:
    - *Mukadimah & Inti Jawapan Ringkas*
    - *Dalil Al-Quran* (Surah, Ayat & Terjemahan)
    - *Dalil As-Sunnah & Athar Sahabat* (Perawi, Terjemahan, Sumber Riwayat & Takhrij Darjat Hadis yang disahkan; jika hadis yang ditanya itu dhaif/palsu, jelaskan dengan beradab dan berikan ganti hadis yang sahih)
    - *Nukilan Kitab / Maktabah Shamela* (Penjelasan ulama Salaf / tahqiq beserta nama kitab; jangan meneka nombor halaman jika tidak pasti)
    - *Kesimpulan Ringkas* + Wallahu a'lam bisshawab.`;
-  
+
+  // Bina rangkaian perbualan (sejarah terdahulu + soalan semasa)
+  const conversationContents = [
+    ...(session ? session.history : []),
+    { role: 'user', parts: [{ text: currentPrompt }] }
+  ];
+
+  let answer;
   try {
-    return await callGeminiApi(prompt, SYSTEM_INSTRUCTION, true, 0.15);
+    answer = await callGeminiApi(conversationContents, SYSTEM_INSTRUCTION, true, 0.15);
   } catch (err) {
     console.warn('[Gemini] Percubaan dengan Google Search gagal, cuba tanpa tools...', err.message);
-    return await callGeminiApi(prompt, SYSTEM_INSTRUCTION, false, 0.15);
+    answer = await callGeminiApi(conversationContents, SYSTEM_INSTRUCTION, false, 0.15);
   }
+
+  // Simpan soalan & jawapan ke dalam memori sesi semasa
+  saveTurnToMemory(chatId, `Soalan ahli grup: "${question}"`, answer);
+
+  // Jika sesi baru sahaja ditukar kerana memori terdahulu penuh, lampirkan nota makluman kecil
+  if (rotated && reason === 'full') {
+    const rotationNote = `🔄 _[Memori perbualan terdahulu telah penuh (${MAX_MEMORY_TURNS} soalan). Sesi perbualan baharu telah dimulakan.]_\n\n`;
+    return rotationNote + answer;
+  }
+
+  return answer;
 }
 
 /**
@@ -173,4 +278,5 @@ module.exports = {
   answerQuestionWithDalil,
   generateDailyFaedah,
   generateQuiz,
+  clearChatMemory,
 };
